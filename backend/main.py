@@ -24,6 +24,26 @@ from typing import List
 from fastapi import File, Form
 import time
 
+import util
+
+util.load_dotenv_from_azd()
+
+oot_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+handler = logging.StreamHandler()
+formatter = logging.Formatter(
+    '%(asctime)s.%(msecs)03d - %(levelname)s - %(name)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+handler.setFormatter(formatter)
+
+# Clear existing handlers and set the new one
+root_logger.handlers.clear()
+root_logger.addHandler(handler)
+
+logging.getLogger('azure.core.pipeline.policies.http_logging_policy').setLevel(logging.WARNING)
+logging.getLogger('azure.monitor.opentelemetry.exporter.export').setLevel(logging.WARNING)
+
 print("Starting the server...")
 #print(f'AZURE_OPENAI_ENDPOINT:{os.getenv("AZURE_OPENAI_ENDPOINT")}')
 #print(f'COSMOS_DB_URI:{os.getenv("COSMOS_DB_URI")}')
@@ -94,12 +114,12 @@ oauth2_scheme = OAuth2AuthorizationCodeBearer(
 
 async def validate_tokenx(token: str = Depends(oauth2_scheme)):
     # In production, implement proper token validation
-    print("Token:", token)
+    logging.debug(f"Received token (mock validation): {token}")    
     return {"sub": "user123", "name": "Test User"}  # Mocked user data
 
 async def validate_token(token: str = None):
     # In production, implement proper token validation
-    print("Token:", token)
+    logging.debug(f"Received token (mock validation): {token}")
     return {"sub": "user123", "name": "Test User"}  # Mocked user data
 
 from openai import AsyncAzureOpenAI
@@ -111,10 +131,15 @@ async def get_openai_client():
         azure_credential, "https://cognitiveservices.azure.com/.default"
     )
     
+    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+    if not endpoint:
+         logging.error("AZURE_OPENAI_ENDPOINT environment variable not set!")
+         # Handle error appropriately, maybe raise an exception or return None
+         raise ValueError("Azure OpenAI endpoint is not configured.")
+
     return AsyncAzureOpenAI(
-        api_version="2024-12-01-preview",
-        # azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-        # azure_endpoint="https://aoai-eastus-mma-cdn.openai.azure.com/",
+        api_version="2024-05-01-preview", # Use a specific, non-preview version if possible
+        azure_endpoint=endpoint,
         azure_ad_token_provider=token_provider
     )
 
@@ -173,9 +198,10 @@ async def summarize_plan(plan, client):
     plan_summary = result.content
     return plan_summary
 async def display_log_message(log_entry, logs_dir, session_id, user_id, client=None):
+    # ... (existing logic to parse log_entry and create _response) ...
     _log_entry_json = log_entry
     _user_id = user_id
-    
+
     _response = AutoGenMessage(
         time=get_current_time(),
         session_id=session_id,
@@ -186,15 +212,15 @@ async def display_log_message(log_entry, logs_dir, session_id, user_id, client=N
     if isinstance(_log_entry_json, TaskResult):
         _response.type = "TaskResult"
         _response.source = "TaskResult"
-        _response.content = _log_entry_json.messages[-1].content
+        _response.content = _log_entry_json.messages[-1].content if _log_entry_json.messages else "Task finished."
         _response.stop_reason = _log_entry_json.stop_reason
-        store_conversation(_log_entry_json, _response)
+        # store_conversation(_log_entry_json, _response) # This seems specific, ensure it works
 
     elif isinstance(_log_entry_json, MultiModalMessage):
         _response.type = _log_entry_json.type
         _response.source = _log_entry_json.source
-        _response.content = _log_entry_json.content[0] # text wthout image
-        _response.content_image = _log_entry_json.content[1].data_uri # TODO: base64 encoded image -> text / serialize
+        _response.content = _log_entry_json.content[0] if _log_entry_json.content else "" # text wthout image
+        _response.content_image = _log_entry_json.content[1].data_uri if len(_log_entry_json.content) > 1 else None # TODO: base64 encoded image -> text / serialize
 
     elif isinstance(_log_entry_json, TextMessage):
         _response.type = _log_entry_json.type
@@ -204,28 +230,36 @@ async def display_log_message(log_entry, logs_dir, session_id, user_id, client=N
     elif isinstance(_log_entry_json, ToolCallExecutionEvent):
         _response.type = _log_entry_json.type
         _response.source = _log_entry_json.source
-        _response.content = _log_entry_json.content[0].content # tool execution
+        _response.content = _log_entry_json.content[0].content if _log_entry_json.content else "" # tool execution
 
     elif isinstance(_log_entry_json, ToolCallRequestEvent):
         # _models_usage = _log_entry_json.models_usage
         _response.type = _log_entry_json.type
         _response.source = _log_entry_json.source
-        _response.content = _log_entry_json.content[0].arguments # tool execution
+        _response.content = _log_entry_json.content[0].arguments if _log_entry_json.content else "" # tool execution
 
     else:
-        _response.type = "N/A"
-        _response.source = "N/A"
-        _response.content = "Agents mumbling."
+        _response.type = "Unknown"
+        _response.source = "System"
+        _response.content = f"Received unknown log entry type: {type(_log_entry_json)}"
+        logging.warning(f"Unknown log entry type received: {type(_log_entry_json)}")
 
-    _ = crud.save_message(
-            id=None, # it is auto-generated
-            user_id=_user_id,
-            session_id=session_id,
-            message=_response.to_json(),
-            agents=None,
-            run_mode_locally=None,
-            timestamp=_response.time
-        )
+
+    try:
+        # Save message using CRUD operation
+        crud.save_message(
+                id=str(uuid.uuid4()), # Ensure ID is string if needed by DB
+                user_id=_user_id,
+                session_id=session_id,
+                message=_response.to_json(),
+                agents=None, # Populate if available/needed
+                run_mode_locally=None, # Populate if available/needed
+                timestamp=_response.time
+            )
+        logging.debug(f"Saved message for session {session_id}, source {_response.source}")
+    except Exception as e:
+        logging.error(f"Failed to save message for session {session_id}: {e}", exc_info=True)
+        # Decide if you want to surface this error to the stream
 
     return _response
 
@@ -238,6 +272,8 @@ blob_service_client = BlobServiceClient.from_connection_string(
     "BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
 )
 
+# Get tracer instance for manual spans (optional)
+tracer = get_tracer(__name__)
 # Chat Endpoint
 @app.post("/chat")
 async def chat_endpoint(
@@ -277,30 +313,53 @@ async def chat_endpoint(
     message: schemas.ChatMessageCreate,
     user: dict = Depends(validate_token)
 ):
-    # print("User:", user["sub"])
-    _user_id=message.user_id if message.user_id else user["sub"]
-    print("Provided user_id:", message.user_id)
-    _agents = json.loads(message.agents) if message.agents else MAGENTIC_ONE_DEFAULT_AGENTS
-    _session_id = generate_session_name()
-    conversation = crud.save_message(
-        id=uuid.uuid4(),
-        user_id=_user_id,
-        session_id=_session_id,
-        message={"content": message.content, "role": "user"},
-        agents=_agents,
-        run_mode_locally=False,
-        timestamp=get_current_time()
-    )
-    # Return session_id as the conversation identifier
-    db_message = schemas.ChatMessageResponse(
-        id=uuid.uuid4(),
-        content=message.content,
-        response=_session_id,
-        timestamp="2021-01-01T00:00:00",
-        user_id=_user_id,
-        orm_mode=True
-    )
-    return db_message
+     with tracer.start_as_current_span("start_chat_request") as span:
+        _user_id = message.user_id if message.user_id else user["sub"]
+        logging.info(f"Starting new chat for user: {_user_id}")
+        span.set_attribute("user_id", _user_id) # Add attributes to span
+
+        try:
+            _agents = json.loads(message.agents) if message.agents else MAGENTIC_ONE_DEFAULT_AGENTS
+            _session_id = generate_session_name()
+            logging.info(f"Generated session ID: {_session_id}")
+            span.set_attribute("session_id", _session_id)
+            span.set_attribute("num_agents", len(_agents))
+
+            # Save the initial user message
+            conversation = crud.save_message(
+                id=str(uuid.uuid4()),
+                user_id=_user_id,
+                session_id=_session_id,
+                message={"content": message.content, "role": "user"},
+                agents=_agents,
+                run_mode_locally=False, # Assuming default, adjust if needed
+                timestamp=get_current_time()
+            )
+            logging.info(f"Initial message saved for session: {_session_id}")
+
+            # Return session_id as the conversation identifier
+            db_message = schemas.ChatMessageResponse(
+                id=str(uuid.uuid4()), # This seems like a response ID, not conversation ID
+                content=message.content,
+                response=_session_id, # This is the key identifier
+                timestamp=get_current_time(),
+                user_id=_user_id,
+                # orm_mode=True # Deprecated in Pydantic v2, use model_config
+                model_config = schemas.ConfigDict(from_attributes=True)
+            )
+            span.set_attribute("app.status", "success")
+            return db_message
+        except json.JSONDecodeError as e:
+            logging.error(f"Invalid JSON in agents data: {e}", exc_info=True)
+            span.record_exception(e)
+            span.set_attribute("app.status", "error")
+            raise HTTPException(status_code=400, detail=f"Invalid agents JSON: {e}")
+        except Exception as e:
+            logging.error(f"Error starting chat session: {e}", exc_info=True)
+            span.record_exception(e)
+            span.set_attribute("app.status", "error")
+            raise HTTPException(status_code=500, detail=f"Internal server error starting chat: {e}")
+
 
 
 # Streaming Chat Endpoint
@@ -311,55 +370,104 @@ async def chat_stream(
     # db: Session = Depends(get_db),
     user: dict = Depends(validate_token)
 ):
-    # create folder for logs if not exists
-    logs_dir="./logs"
-    if not os.path.exists(logs_dir):    
-        os.makedirs(logs_dir)
+    # Start a new span for this streaming request
+    with tracer.start_as_current_span("chat_stream_request") as span:
+        logging.info(f"Initiating chat stream for session: {session_id}, user: {user_id}")
+        span.set_attribute("session_id", session_id)
+        span.set_attribute("user_id", user_id)
 
-    # get the conversation from the database using user and session id
-    conversation = crud.get_conversation(user_id, session_id)
-    # get first message from the conversation
-    first_message = conversation["messages"][0]
-    # get the task from the first message as content
-    task = first_message["content"]
-    print("Task:", task)
+        logs_dir="./logs"
+        try:
+            if not os.path.exists(logs_dir):
+                os.makedirs(logs_dir)
+                logging.info(f"Created logs directory: {logs_dir}")
 
-    _run_locally = conversation["run_mode_locally"]
-    _agents = conversation["agents"]
-    
-    
-    #  Initialize the MagenticOne system
-    magentic_one = MagenticOneHelper(logs_dir=logs_dir, save_screenshots=False, run_locally=_run_locally)
-    await magentic_one.initialize(agents=_agents, session_id=session_id)
+            # Fetch conversation details
+            conversation = crud.get_conversation(user_id, session_id)
+            if not conversation or not conversation.get("messages"):
+                logging.error(f"Conversation not found or empty for session: {session_id}, user: {user_id}")
+                span.set_attribute("app.error", "ConversationNotFound")
+                raise HTTPException(status_code=404, detail="Conversation not found or is empty.")
 
-    stream, cancellation_token = magentic_one.main(task = task)
+            first_message = conversation["messages"][0]
+            task = first_message.get("content")
+            if not task:
+                 logging.error(f"Task content missing in first message for session: {session_id}")
+                 span.set_attribute("app.error", "TaskMissing")
+                 raise HTTPException(status_code=400, detail="Task content missing in conversation.")
 
-    # DBG
-    # stream = [TextMessage(source="MagenticOneOrchestrator", models_usage=None, content="Please create a Python script that computes and prints the Fibonacci series where all numbers are below 1000.", type="TextMessage"),
-    #             TextMessage(source="MagenticOneOrchestrator", models_usage=None, content="Druhaa message.", type="TextMessage"),
-    #          ]
-    
-    # TODO: Store the cancellation token in the session data
-    # session_data[session_id]["cancellation_token"] = cancellation_token
+            logging.info(f"Retrieved task for session {session_id}: {task[:100]}...") # Log truncated task
+            span.set_attribute("app.task_length", len(task))
 
-    # async for log_entry in stream:
-    #     yield f"data: {json.dumps({'response': f'session {session_id} and message: {log_entry.content}'})}\n\n"
+            _run_locally = conversation.get("run_mode_locally", False)
+            _agents = conversation.get("agents", MAGENTIC_ONE_DEFAULT_AGENTS)
+            span.set_attribute("app.run_locally", _run_locally)
+            span.set_attribute("app.num_agents", len(_agents))
+
+            # Initialize MagenticOne (SDK calls within this will be traced)
+            magentic_one = MagenticOneHelper(logs_dir=logs_dir, save_screenshots=False, run_locally=_run_locally)
+            await magentic_one.initialize(agents=_agents, session_id=session_id)
+            logging.info(f"MagenticOne initialized for session: {session_id}")
+
+            # Start the main processing stream (SDK calls within this will be traced)
+            stream, cancellation_token = magentic_one.main(task=task)
+            logging.info(f"MagenticOne main process started for session: {session_id}")
+
+            # Store cancellation token (Consider a more robust distributed cache/store)
+            session_data[session_id] = {"cancellation_token": cancellation_token}
+
+        except HTTPException as http_exc:
+            # Don't record HTTPException again if already raised
+            span.set_attribute("app.status", "error")
+            raise http_exc # Re-raise known HTTP exceptions
+        except Exception as e:
+            logging.error(f"Error setting up chat stream for session {session_id}: {e}", exc_info=True)
+            span.record_exception(e)
+            span.set_attribute("app.status", "error")
+            raise HTTPException(status_code=500, detail=f"Failed to initialize chat stream: {e}")
+
+        # --- Event Generator for Streaming Response ---
+        async def event_generator(stream_source):
+            # This part runs *after* the initial setup span has finished,
+            # but operations within MagenticOneHelper should still generate their own spans.
+            logging.debug(f"Starting event generator for session: {session_id}")
+            message_count = 0
+            try:
+                async for log_entry in stream_source:
+                    message_count += 1
+                    logging.debug(f"Stream received item {message_count} for session {session_id}: {type(log_entry)}")
+                    try:
+                        # Process and format the log entry (SDK calls inside display_log_message might be traced)
+                        json_response = await display_log_message(log_entry=log_entry, logs_dir=logs_dir, session_id=session_id, client=getattr(magentic_one, 'client', None), user_id=user_id)
+                        yield f"data: {json.dumps(json_response.to_json())}\n\n"
+                    except Exception as display_err:
+                         logging.error(f"Error processing/displaying log entry for session {session_id}: {display_err}", exc_info=True)
+                         # Optionally yield an error message to the client
+                         error_msg = {"error": "Failed to process message", "details": str(display_err)}
+                         yield f"data: {json.dumps(error_msg)}\n\n"
+
+                logging.info(f"Event generator finished for session {session_id} after {message_count} messages.")
+                # You might want to add a final "completed" message here
+                yield f"data: {json.dumps({'status': 'completed', 'session_id': session_id})}\n\n"
+
+            except asyncio.CancelledError:
+                 logging.warning(f"Stream cancelled for session: {session_id}")
+                 yield f"data: {json.dumps({'status': 'cancelled', 'session_id': session_id})}\n\n"
+            except Exception as gen_err:
+                logging.error(f"Error during stream generation for session {session_id}: {gen_err}", exc_info=True)
+                # Yield an error message to the client
+                error_msg = {"error": "Streaming error occurred", "details": str(gen_err)}
+                yield f"data: {json.dumps(error_msg)}\n\n"
+            finally:
+                 logging.debug(f"Cleaning up event generator for session: {session_id}")
+                 # Clean up session data if needed
+                 session_data.pop(session_id, None)
 
 
-    async def event_generator(stream):
-
-        async for log_entry in stream:
-            json_response = await display_log_message(log_entry=log_entry, logs_dir=logs_dir, session_id=magentic_one.session_id, client=magentic_one.client, user_id=user_id)    
-            yield f"data: {json.dumps(json_response.to_json())}\n\n"
-      
-        # # DBG
-        # for log_entry in stream:
-        #     import time
-        #     time.sleep(1)
-        #     json_response = await display_log_message(log_entry=log_entry, logs_dir=logs_dir, session_id=session_id, client=None, user=user)
-        #     yield f"data: {json.dumps(json_response.to_json())}\n\n"
-
-    return StreamingResponse(event_generator(stream), media_type="text/event-stream")
+        # Return the streaming response
+        # Note: The initial setup span ends here. Spans within event_generator are separate.
+        span.set_attribute("app.status", "streaming") # Indicate streaming started
+        return StreamingResponse(event_generator(stream), media_type="text/event-stream")
 
 @app.get("/stop")
 async def stop(session_id: str = Query(...)):
@@ -381,13 +489,24 @@ async def list_all_conversations(
     user_id: schemas.User,
     user: dict = Depends(validate_token)
     ):
-    try:
-        # conversations = fetch_user_conversatons(user_id=user_id.user_id)
-        conversations = fetch_user_conversatons(user_id=None) # Fetch all conversations
-        return conversations
-    except Exception as e:
-        print(f"Error retrieving conversations: {str(e)}")
-        return []
+    with tracer.start_as_current_span("list_all_conversations") as span:
+        target_user_id = user_id_data.user_id # Extract user_id from request body
+        logging.info(f"Fetching all conversations (requested for user: {target_user_id})")
+        span.set_attribute("requesting_user_id", user.get("sub")) # Log who requested it
+        span.set_attribute("target_user_id", target_user_id) # Log which user's data was requested (even if fetching all)
+        try:
+            # conversations = fetch_user_conversatons(user_id=target_user_id) # Fetch for specific user
+            conversations = fetch_user_conversatons(user_id=None) # Fetch all conversations as per original code
+            span.set_attribute("num_conversations_fetched", len(conversations))
+            span.set_attribute("app.status", "success")
+            return conversations
+        except Exception as e:
+            logging.error(f"Error retrieving conversations: {e}", exc_info=True)
+            span.record_exception(e)
+            span.set_attribute("app.status", "error")
+            # Return empty list or raise appropriate HTTP error
+            # raise HTTPException(status_code=500, detail="Failed to retrieve conversations")
+            return [] # Returning empty list as per original code
 
 # New endpoint to retrieve conversations for the authenticated user.
 @app.post("/conversations/user")
@@ -412,17 +531,28 @@ async def delete_conversation(session_id: str = Query(...), user_id: str = Query
     
 @app.get("/health")
 async def health_check():
-    print("Health check endpoint called")
-    return {"status": "healthy"}
+    with tracer.start_as_current_span("health_check"):
+        logging.debug("Health check endpoint called")
+        return {"status": "healthy"}
 
 @app.post("/upload")
 async def upload_files(indexName: str = Form(...), files: List[UploadFile] = File(...)):
-    print("Received indexName:", indexName)
-    for file in files:
-        print("Uploading file:", file.filename)
-    try:
-        aisearch.process_upload_and_index(indexName, files)
-    except Exception as err:
-        print(f"Error processing upload and index: {err}")
-        return {"status": "error", "message": str(err)}
-    return {"status": "success", "filenames": [f.filename for f in files]}
+     with tracer.start_as_current_span("upload_files") as span:
+        logging.info(f"Upload request received for index: {indexName}, files: {[f.filename for f in files]}")
+        span.set_attribute("index_name", indexName)
+        span.set_attribute("num_files", len(files))
+        try:
+            # Calls within process_upload_and_index might be auto-instrumented if they use Azure SDKs
+            aisearch.process_upload_and_index(indexName, files)
+            logging.info(f"Successfully processed upload for index: {indexName}")
+            span.set_attribute("app.status", "success")
+            return {"status": "success", "filenames": [f.filename for f in files]}
+        except Exception as err:
+            logging.error(f"Error processing upload and index for {indexName}: {err}", exc_info=True)
+            span.record_exception(err)
+            span.set_attribute("app.status", "error")
+            # Return error status, avoid raising HTTPException if client expects JSON status
+            return JSONResponse(
+                status_code=500,
+                content={"status": "error", "message": f"Error processing upload: {err}"}
+            )

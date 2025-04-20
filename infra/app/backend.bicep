@@ -8,7 +8,7 @@ param containerAppsEnvironmentName string
 param applicationInsightsName string
 param exists bool
 
-param azureOpenaiResourceName string = 'dreamv2' 
+
 param azureOpenaiDeploymentName string = 'gpt-4o'
 param azureOpenaiDeploymentNameMini string = 'gpt-4o-mini'
 param azureOpenaiDeploymentNameEmbedding string = 'text-embedding-3-large'
@@ -37,6 +37,12 @@ param defaultSubnetId string
 
 @description('The ID of the target virtual network for private DNS association')
 param vnetId string
+
+@description('Azure AI Services endpoint URL provided by the AI Services resource.')
+param azureOpenaiEndpoint string
+
+@description('Name of the deployment for text embeddings within AI Services.')
+param azureOpenaiEmbeddingDeploymentName string
 
 var appSettingsArray = filter(array(appDefinition.settings), i => i.name != '')
 var secrets = map(filter(appSettingsArray, i => i.?secret != null), i => {
@@ -361,7 +367,7 @@ resource app 'Microsoft.App/containerApps@2023-05-02-preview' = {
             }
             {
               name: 'AZURE_OPENAI_ENDPOINT'
-              value: openai.properties.endpoint
+              value: azureOpenaiEndpoint
             }
             {
               name: 'POOL_MANAGEMENT_ENDPOINT'
@@ -393,7 +399,7 @@ resource app 'Microsoft.App/containerApps@2023-05-02-preview' = {
             }
             {
               name: 'AZURE_OPENAI_EMBEDDING_MODEL'
-              value: openaideploymentembedding.name
+              value: azureOpenaiEmbeddingDeploymentName
             }
             {
               name: 'AZURE_STORAGE_ACCOUNT_ENDPOINT'
@@ -427,74 +433,7 @@ resource app 'Microsoft.App/containerApps@2023-05-02-preview' = {
   }
 }
 
-resource openai 'Microsoft.CognitiveServices/accounts@2024-10-01' = {
-  name: azureOpenaiResourceName
-  location: location
-  sku: {
-    name: 'S0'
-  }
-  kind: 'OpenAI'
-  properties: {
-    customSubDomainName: customSubDomainName
-  }
-}
 
-// Define the OpenAI deployment
-resource openaideployment 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = {
-  name: azureOpenaiDeploymentName
-  parent: openai
-  sku: {
-    name: 'GlobalStandard'
-    capacity: 70
-  }
-  properties: {
-    model: {
-      name: 'gpt-4o'
-      format: 'OpenAI'
-      version: '2024-11-20'
-      
-    }
-    versionUpgradeOption: 'OnceCurrentVersionExpired'
-  }
-}
-
-resource openaideploymentmini 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = {
-  name: azureOpenaiDeploymentNameMini
-  parent: openai
-  sku: {
-    name: 'GlobalStandard'
-    capacity: 70
-  }
-  properties: {
-    model: {
-      name: 'gpt-4o-mini'
-      format: 'OpenAI'
-      version: '2024-07-18'
-      
-    }
-    versionUpgradeOption: 'OnceCurrentVersionExpired'
-  }
-  dependsOn: [openaideployment]
-}
-
-resource openaideploymentembedding 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = {
-  name: azureOpenaiDeploymentNameEmbedding
-  parent: openai
-  sku: {
-    name: 'Standard'
-    capacity: 60
-  }
-  properties: {
-    model: {
-      name: 'text-embedding-3-large'
-      format: 'OpenAI'
-      version: '1'
-      
-    }
-    versionUpgradeOption: 'OnceCurrentVersionExpired'
-  }
-  dependsOn: [openaideploymentmini]
-}
 
 resource dynamicsession 'Microsoft.App/sessionPools@2024-02-02-preview' = {
   name: 'sessionPool'
@@ -538,24 +477,7 @@ resource appSessionPoolRoleAssignment 'Microsoft.Authorization/roleAssignments@2
   }
 }
 
-resource userOpenaiRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(openai.id, userPrincipalId, 'Cognitive Services OpenAI User')
-  scope: openai
-  properties: {
-    principalId: userPrincipalId
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd')
-  }
-} 
 
-resource appOpenaiRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(openai.id, identity.id, 'Cognitive Services OpenAI User')
-  scope: openai
-  properties: {
-    principalId: identity.properties.principalId
-    principalType: 'ServicePrincipal'
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd')
-  }
-}
 
 @description('Name of the role definition.')
 param roleDefinitionName string = 'Azure Cosmos DB for NoSQL Data Plane Owner'
@@ -616,3 +538,5 @@ output userAssignedIdentityId string = identity.id
 output opemaiEmbeddingModel string = openaideploymentembedding.name
 output opemaiEmbeddingModelId string = openaideploymentembedding.id
 output ai_search_endpoint string = 'https://${aiSearch.name}.search.windows.net'
+output azure_endpoint string = azureOpenaiEndpoint // Output the endpoint passed in
+output opemaiEmbeddingModel string = azureOpenaiEmbeddingDeploymentName // Output the deployment name passed in
