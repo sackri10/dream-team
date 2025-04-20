@@ -90,9 +90,10 @@ export default function App() {
   // const [isSettingsCardVisible, setIsSettingsCardVisible] = useState(false)
   const [isTyping, setIsTyping] = useState(false);
   const { userInfo } = useUserContext();
-  const { teams } = useTeamsContext();
+  // const { teams } = useTeamsContext();
+  const { teams, loading } = useTeamsContext();
   const [agents, setAgents] = useState<Agent[]>([]);
-  const [selectedTeam, setSelectedTeam] = useState<Team>(teams[0]);
+  const [selectedTeam, setSelectedTeam] = useState<Team | null>(null);
 
   // Initialize agents from default team (will be updated by sidebar selection)
   // Optionally use an effect to set initial team agents if needed
@@ -102,15 +103,24 @@ export default function App() {
     setSelectedTeam(team);
   }
   
+  // Set initial team once teams are loaded
+  useEffect(() => {
+    if (!loading && teams.length > 0 && selectedTeam === null) {
+      setSelectedTeam(teams[0]);
+      setAgents(teams[0].agents);
+    }
+  }, [loading, teams, selectedTeam]);
+
   // Propagate team changes from TeamsContext to Playground local state
   useEffect(() => {
+    if (!selectedTeam) return;
     const updatedTeam = teams.find(team => team.name === selectedTeam.name);
     if (updatedTeam) {
       setSelectedTeam(updatedTeam);
       setAgents(updatedTeam.agents);
     }
     console.log('Selected team in play:', selectedTeam.name);
-  }, [teams, selectedTeam.name]);
+  }, [teams, selectedTeam?.name]);
 
   const stopSession = async () => {
     try {
@@ -266,6 +276,20 @@ export default function App() {
     }
   }
 
+  if (loading || !selectedTeam) {
+    return (
+      <ThemeProvider defaultTheme="light" storageKey="vite-ui-theme">
+        <SidebarProvider defaultOpen={true}>
+          <AppSidebar onTeamSelect={handleTeamSelect} />
+          <SidebarInset>
+            <div className="flex items-center justify-center h-40">
+              <Loader2 className="h-8 w-8 animate-spin" /> Loading teams...
+            </div>
+          </SidebarInset>
+        </SidebarProvider>
+      </ThemeProvider>
+    );
+  }
   return (
     <ThemeProvider defaultTheme="light" storageKey="vite-ui-theme">
     {!isAuthenticated ? (

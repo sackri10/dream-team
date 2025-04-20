@@ -100,7 +100,7 @@ class MagenticOneHelper:
         self.client = AzureOpenAIChatCompletionClient(
             model="gpt-4o-2024-11-20",
             azure_deployment="gpt-4o",
-            api_version="2024-06-01",
+            api_version="2025-03-01-preview",
             azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
             azure_ad_token_provider=token_provider,
             model_info={
@@ -110,6 +110,21 @@ class MagenticOneHelper:
                 "family": "gpt-4o"
             }
         )
+
+        self.client_reasoning = AzureOpenAIChatCompletionClient(
+            model="o3-mini",
+            azure_deployment="o3-mini",
+            api_version="2025-03-01-preview",
+            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+            azure_ad_token_provider=token_provider,
+            model_info={
+                "vision": True,
+                "function_calling": True,
+                "json_output": True,
+                "family": "o3"
+            }
+        )
+
 
         # Set up agents
         self.agents = await self.setup_agents(agents, self.client, self.logs_dir) 
@@ -198,6 +213,7 @@ class MagenticOneHelper:
         team = MagenticOneGroupChat(
             participants=self.agents,
             model_client=self.client,
+            # model_client=self.client_reasoning,
             max_turns=self.max_rounds,
             max_stalls=self.max_stalls_before_replan,
             

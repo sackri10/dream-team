@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
-import { Trash, Plus, Edit, Download } from 'lucide-react';
+import { Trash, Plus, Edit, Download, Save, Loader2 } from 'lucide-react';
 import { Dialog, DialogTrigger, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogClose, DialogFooter } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
@@ -16,13 +16,25 @@ interface AgentsSetupProps {
 }
 
 export function AgentsSetup({ team, getAvatarSrc, isCollapsed }: AgentsSetupProps) {
-  const { addAgent, removeAgent, addRAGAgent, editAgent } = useTeamsContext();
+  const { addAgent, removeAgent, addRAGAgent, editAgent, saveTeam } = useTeamsContext();
   const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
+  const [hasTeamChanged, setHasTeamChanged] = useState<boolean>(false);
+  const [isSavingTeam, setIsSavingTeam] = useState<boolean>(false);
 
   return (
     <div className="space-y-4">
-      <div className="grid auto-rows-min gap-4 md:grid-cols-5 text-sm">
+      <div className="grid auto-rows-min gap-4 md:grid-cols-2 text-sm">
         <h2>{team.name}</h2>
+        {hasTeamChanged && (
+          <Button variant="destructive" onClick={async () => { 
+            setIsSavingTeam(true);
+            await saveTeam(team);
+            setHasTeamChanged(false);
+            setIsSavingTeam(false);
+          }}>
+            <Save /> Update
+          </Button>
+        )}
       </div>
       <div className="grid auto-rows-min gap-4 md:grid-cols-5">
         {team.agents.map((agent) => (
@@ -41,7 +53,7 @@ export function AgentsSetup({ team, getAvatarSrc, isCollapsed }: AgentsSetupProp
               <>
                 <Separator className="my-2" />
                 <div className="flex space-x-2">
-                  <Button size="icon" variant="outline" onClick={() => removeAgent(team.teamId, agent.input_key)}>
+                  <Button size="icon" variant="outline" onClick={() => { removeAgent(team.team_id, agent.input_key); setHasTeamChanged(true); }}>
                     <Trash />
                   </Button>
                   <Button size="icon" variant="outline" onClick={() => setEditingAgent(agent)}>
@@ -99,7 +111,8 @@ export function AgentsSetup({ team, getAvatarSrc, isCollapsed }: AgentsSetupProp
                         const name = (document.getElementById('name') as HTMLInputElement).value;
                         const description = (document.getElementById('description') as HTMLTextAreaElement).value;
                         const systemMessage = (document.getElementById('system_message') as HTMLTextAreaElement).value;
-                        addAgent(team.teamId, name, description, systemMessage);
+                        addAgent(team.team_id, name, description, systemMessage);
+                        setHasTeamChanged(true);
                       }}
                       variant="default"
                     >
@@ -168,7 +181,8 @@ export function AgentsSetup({ team, getAvatarSrc, isCollapsed }: AgentsSetupProp
                         const description = (document.getElementById('description') as HTMLTextAreaElement).value;
                         const indexName = (document.getElementById('index_name') as HTMLInputElement).value;
                         const files = (document.getElementById('file_upload') as HTMLInputElement).files;
-                        addRAGAgent(team.teamId, name, description, indexName, files);
+                        addRAGAgent(team.team_id, name, description, indexName, files);
+                        setHasTeamChanged(true);
                       }}
                       variant="default"
                     >
@@ -219,9 +233,9 @@ export function AgentsSetup({ team, getAvatarSrc, isCollapsed }: AgentsSetupProp
                     const name = (document.getElementById('edit_name') as HTMLInputElement).value;
                     const description = (document.getElementById('edit_description') as HTMLTextAreaElement).value;
                     const systemMessage = (document.getElementById('edit_system_message') as HTMLTextAreaElement).value;
-                    // Call the editAgent callback with the updated values
-                    editAgent(team.teamId, editingAgent.input_key, name, description, systemMessage);
+                    editAgent(team.team_id, editingAgent.input_key, name, description, systemMessage);
                     setEditingAgent(null);
+                    setHasTeamChanged(true);
                   }}
                   variant="default"
                 >
@@ -229,6 +243,20 @@ export function AgentsSetup({ team, getAvatarSrc, isCollapsed }: AgentsSetupProp
                 </Button>
               </DialogClose>
             </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
+      
+      {/* Progress Dialog for saving team */}
+      {isSavingTeam && (
+        <Dialog open={true} onOpenChange={() => {}}>
+          <DialogContent className="max-w-sm">
+            <DialogHeader>
+              <DialogTitle>Saving Team</DialogTitle>
+            </DialogHeader>
+            <div className="py-4">
+            <Loader2 className="h-8 w-8 animate-spin" />  Team is being saved...
+            </div>
           </DialogContent>
         </Dialog>
       )}

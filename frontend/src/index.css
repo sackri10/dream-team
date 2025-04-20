@@ -18,6 +18,12 @@
   margin-top: 4px;
 }
 
+.message h1{
+  font-size: 1.2em;
+  font-weight: 600;
+  margin-top: 12px;
+  margin-bottom: 2px;
+}
 .message h3 {
   font-size: 1.2em;
   font-weight: 600;
@@ -29,6 +35,24 @@
   font-weight: 600;
   margin-top: 12px;
   margin-bottom: 2px;
+}
+
+.message table {
+  border-collapse: collapse;
+  width: 100%;
+  margin-top: 12px;
+}
+.message th,
+.message td {
+  border: 1px solid #ddd;
+  padding: 8px;
+}
+.message th {
+  background-color: #f2f2f2;
+  text-align: left;
+}
+.message tr:hover {
+  background-color: #f1f1f1;
 }
 
 a {

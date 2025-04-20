@@ -1,12 +1,12 @@
 # File: main.py
-from fastapi import FastAPI, Depends, UploadFile, HTTPException, Query
+from fastapi import FastAPI, Depends, UploadFile, HTTPException, Query, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2AuthorizationCodeBearer
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from azure.storage.blob import BlobServiceClient
 # from sqlalchemy.orm import Session
 import schemas, crud
-from database import store_conversation, fetch_user_conversatons,fetch_user_conversation, delete_user_conversation
+from database import CosmosDB
 import os
 import uuid
 from contextlib import asynccontextmanager
@@ -17,11 +17,11 @@ from autogen_agentchat.messages import MultiModalMessage, TextMessage, ToolCallE
 from autogen_agentchat.base import TaskResult
 from magentic_one_helper import generate_session_name
 import aisearch
+import logging
 
 from datetime import datetime 
 from schemas import AutoGenMessage
 from typing import List
-from fastapi import File, Form
 import time
 
 import util
@@ -88,13 +88,18 @@ MAGENTIC_ONE_DEFAULT_AGENTS = [
 # Lifespan handler for startup/shutdown events
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup code
-    # Base.metadata.create_all(bind=engine)
+    # Startup code: initialize database and configure logging
+    # app.state.db = None
+    app.state.db = CosmosDB()
+    logging.basicConfig(level=logging.INFO,
+                        format='%(levelname)s: %(asctime)s - %(message)s')
+    print("Database initialized.")
     yield
     # Shutdown code (optional)
-    # engine.dispose()
+    # Cleanup database connection
+    app.state.db = None
 
-app = FastAPI()
+app = FastAPI(lifespan=lifespan)
 
 # Allow all origins
 app.add_middleware(
@@ -197,7 +202,7 @@ async def summarize_plan(plan, client):
     
     plan_summary = result.content
     return plan_summary
-async def display_log_message(log_entry, logs_dir, session_id, user_id, client=None):
+async def display_log_message(log_entry, logs_dir, session_id, user_id, conversation=None):
     # ... (existing logic to parse log_entry and create _response) ...
     _log_entry_json = log_entry
     _user_id = user_id
@@ -214,7 +219,7 @@ async def display_log_message(log_entry, logs_dir, session_id, user_id, client=N
         _response.source = "TaskResult"
         _response.content = _log_entry_json.messages[-1].content if _log_entry_json.messages else "Task finished."
         _response.stop_reason = _log_entry_json.stop_reason
-        # store_conversation(_log_entry_json, _response) # This seems specific, ensure it works
+        app.state.db.store_conversation(_log_entry_json, _response, conversation)
 
     elif isinstance(_log_entry_json, MultiModalMessage):
         _response.type = _log_entry_json.type
@@ -483,10 +488,10 @@ async def stop(session_id: str = Query(...)):
         print(f"Error stopping session {session_id}: {str(e)}")
         return {"status": "error", "message": f"Error stopping session: {str(e)}"}
 
-# New endpoint to retrieve all conversations.
+# New endpoint to retrieve all conversations with pagination.
 @app.post("/conversations")
 async def list_all_conversations(
-    user_id: schemas.User,
+    request_data: dict,
     user: dict = Depends(validate_token)
     ):
     with tracer.start_as_current_span("list_all_conversations") as span:
@@ -513,24 +518,32 @@ async def list_all_conversations(
 async def list_user_conversation(request_data: dict = None, user: dict = Depends(validate_token)):
     session_id = request_data.get("session_id") if request_data else None
     user_id = request_data.get("user_id") if request_data else None
-    conversations = fetch_user_conversation(user_id, session_id=session_id)
+    conversations = app.state.db.fetch_user_conversation(user_id, session_id=session_id)
     return conversations
 
 @app.post("/conversations/delete")
 async def delete_conversation(session_id: str = Query(...), user_id: str = Query(...), user: dict = Depends(validate_token)):
+    logger = logging.getLogger("delete_conversation")
+    logger.setLevel(logging.INFO)
+    logger.info(f"Deleting conversation with session_id: {session_id} for user_id: {user_id}")
     try:
         # result = crud.delete_conversation(user["sub"], session_id)
-        result = delete_user_conversation(user_id=user_id, session_id=session_id)
+        result = app.state.db.delete_user_conversation(user_id=user_id, session_id=session_id)
         if result:
+            logger.info(f"Conversation {session_id} deleted successfully.")
             return {"status": "success", "message": f"Conversation {session_id} deleted successfully."}
         else:
+            logger.warning(f"Conversation {session_id} not found.")
             return {"status": "error", "message": f"Conversation {session_id} not found."}
     except Exception as e:
-        print(f"Error deleting conversation {session_id}: {str(e)}")
+        logger.error(f"Error deleting conversation {session_id}: {str(e)}")
         return {"status": "error", "message": f"Error deleting conversation: {str(e)}"}
     
 @app.get("/health")
 async def health_check():
+    logger = logging.getLogger("health_check")
+    logger.setLevel(logging.INFO)
+    logger.info("Health check endpoint called")
     with tracer.start_as_current_span("health_check"):
         logging.debug("Health check endpoint called")
         return {"status": "healthy"}
@@ -556,3 +569,56 @@ async def upload_files(indexName: str = Form(...), files: List[UploadFile] = Fil
                 status_code=500,
                 content={"status": "error", "message": f"Error processing upload: {err}"}
             )
+
+from fastapi import HTTPException
+
+@app.get("/teams")
+async def get_teams_api():
+    try:
+        teams = app.state.db.get_teams()
+        return teams
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving teams: {str(e)}")
+
+@app.get("/teams/{team_id}")
+async def get_team_api(team_id: str):
+    try:
+        team = app.state.db.get_team(team_id)
+        if not team:
+            raise HTTPException(status_code=404, detail="Team not found")
+        return team
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving team: {str(e)}")
+
+@app.post("/teams")
+async def create_team_api(team: dict):
+    try:
+        team["agents"] = MAGENTIC_ONE_DEFAULT_AGENTS
+        response = app.state.db.create_team(team)
+        return response
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating team: {str(e)}")
+
+@app.put("/teams/{team_id}")
+async def update_team_api(team_id: str, team: dict):
+    logger = logging.getLogger("update_team_api")
+    logger.info(f"Updating team with ID: {team_id} and data: {team}")
+    try:
+        response = app.state.db.update_team(team_id, team)
+        if "error" in response:
+            logger.error(f"Error updating team: {response['error']}")
+            raise HTTPException(status_code=404, detail=response["error"])
+        return response
+    except Exception as e:
+        logger.error(f"Error updating team: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error updating team: {str(e)}")
+
+@app.delete("/teams/{team_id}")
+async def delete_team_api(team_id: str):
+    try:
+        response = app.state.db.delete_team(team_id)
+        if "error" in response:
+            raise HTTPException(status_code=404, detail=response["error"])
+        return response
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting team: {str(e)}")
